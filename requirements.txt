@@ -1,0 +1,4 @@
+# 修复过若干 bug 的 bayes-optim（见 LesterZoeyXu/BayesianOp）
+bayes-optim @ git+ssh://git@github.com/LesterZoeyXu/BayesianOp.git
+pandas>=2.0
+openpyxl>=3.1
