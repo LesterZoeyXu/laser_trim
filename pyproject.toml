@@ -1,0 +1,26 @@
+[project]
+name = "laser-trim"
+version = "0.1.0"
+description = "用贝叶斯优化调试激光调阻的频率和调阻速度"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bayes-optim",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "torch>=2.0.1",
+]
+
+[tool.uv]
+package = false  # 这是一个脚本工具，不需要打包安装
+
+[tool.uv.sources]
+# 修复过若干 bug 的 bayes-optim
+bayes-optim = { git = "ssh://git@github.com/LesterZoeyXu/BayesianOp.git", branch = "master" }
+# torch 只用 CPU 版，比默认的 CUDA 版小几 GB
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
