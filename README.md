@@ -137,6 +137,12 @@ Linux（x86_64 / ARM）、Windows、Apple Silicon 的 Mac。Intel 芯片的 Mac 
 
 ---
 
+## 原理文档
+
+- [GP（高斯过程）模型的训练原理](docs/gp_training.md)：GP 的假设、最大似然训练过程、预测与 EI 推荐。
+
+---
+
 ## 演示数据
 
 `demo_history.csv` 是 `make_demo_data.py` 生成的**模拟数据**，不代表真实工艺规律，仅用于演示和测试。重新生成：`uv run make_demo_data.py`。
