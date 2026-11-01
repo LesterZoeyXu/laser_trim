@@ -1,14 +1,18 @@
-"""激光调阻参数的贝叶斯优化 —— 命令行工具
+"""激光调阻工艺的贝叶斯优化 —— 命令行工具
+
+对给定的目标阻值，在 3 个固定配方（频率/功率/脉宽）和修阻速度中推荐下一组实验。
 
 用法：
-  python trim_bo.py check                       检查历史数据，评估模型能否预测分数
-  python trim_bo.py ask [-n 3]                  推荐下一组（或 n 组）实验参数
-  python trim_bo.py tell 63.3 200 74.5 [-m 备注]  录入一次实验：频率 速度 分数
-  python trim_bo.py status                      查看实验进度和当前最优参数
-  python trim_bo.py undo                        删除最后一条实验记录（录错时用）
+  python trim_bo.py check                            检查数据，评估模型预测能力
+  python trim_bo.py ask 1e6 [-n 3]                   推荐目标阻值 1 MΩ 的下一组（或 n 组）实验
+  python trim_bo.py tell 1e6 50 9 92.5 0.4 [-m 备注]  录入实验：目标阻值 频率 速度 良率 FT_SD
+  python trim_bo.py status [1e6]                     查看所有（或某个）目标阻值的最优参数
+  python trim_bo.py undo                             删除最后一条实验记录（录错时用）
 
-所有新实验记录在 experiments.csv 中（可以用 Excel 打开和修改）。
-每次 ask/status 都会用"历史数据 + 新实验记录"重新热启动 BO，因此不需要保存优化器状态。
+加 --history 文件 可以换数据来源，例如 python trim_bo.py --history demo_history.csv check
+
+模型：每个配方一个高斯过程，输入为 (log10 目标阻值, 速度)，输出为分数。
+所有新实验记录在 experiments.csv 中，每次运行都用"历史数据 + 新实验"重新训练，不保存模型状态。
 """
 import argparse
 import os
@@ -16,143 +20,223 @@ import sys
 import warnings
 from datetime import datetime
 
+# 训练用的矩阵不大，线程开太多只会空转；必须在导入 numpy 之前设置
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+
 import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
 
+from scipy.stats import norm
 from sklearn.metrics import r2_score
-from sklearn.model_selection import KFold
+from sklearn.model_selection import GroupKFold, KFold
 
-from bayes_optim import BO, NoisyBO, RealSpace
 from bayes_optim.surrogate import GaussianProcess, trend
 
-# ======================= 配置：换成你的真实数据时只需改这里 =======================
-HISTORY_FILE = "demo_history.csv"  # 历史数据，也可以是 .xlsx
+# ======================= 配置：换数据或调整工艺时只需改这里 =======================
+HISTORY_FILE = "data/AI参数优化项目数据统计.xlsx"
+HEADER_ROW = 2  # Excel 中列名所在行（从 0 开始数）；CSV 的列名固定在第一行
 EXPERIMENTS_FILE = "experiments.csv"  # 新实验记录（由 tell 自动维护）
-COLUMNS = {"freq": "频率", "speed": "速度", "score": "分数"}  # 程序用名 -> 文件里的列名
-UNITS = {"freq": "kHz", "speed": "mm/s"}
-BOUNDS = {"freq": (20.0, 100.0), "speed": (10.0, 200.0)}  # 允许搜索的参数范围
-MAX_NEW_EXPERIMENTS = 20  # 计划再做多少次实验（历史数据不计入）
+COLUMNS = {  # 程序用名 -> 历史数据里的列名
+    "target": "电阻修阻目标阻值(Ω)",
+    "freq": "频率(1khz-100Khz)",
+    "speed": "修阻速度(1mm/s-20 mm/s)",
+    "yield": "良率(%)",
+    "sd": "FT SD(%)",
+}
+RECIPES = {  # 频率(kHz) -> 固定搭配的功率和脉宽
+    10: {"功率(W)": 0.811, "脉宽(ns)": 7.2},
+    50: {"功率(W)": 3.142, "脉宽(ns)": 16.3},
+    100: {"功率(W)": 0.966, "脉宽(ns)": 26.0},
+}
+VALID_SPEED = (1.0, 20.0)  # 设备允许的速度，超出的历史记录不参与训练
+SEARCH_SPEED = (5.0, 15.0)  # 推荐时搜索的速度范围，应设为工艺上稳定、数据较多的区间
+SPEED_STEP = 0.5  # 推荐速度的步长（mm/s）
+BATCH_MIN_GAP = 2.0  # 一批多组推荐时，同一配方的速度至少相隔多少 mm/s
+YIELD_WEIGHT, SD_WEIGHT = 0.5, 1.0  # 分数 = 0.5 × 良率 - 1 × FT SD
 SEED = 42
 # ===============================================================================
 
-VARS = list(BOUNDS)
-LB = np.array([BOUNDS[v][0] for v in VARS])
-UB = np.array([BOUNDS[v][1] for v in VARS])
 HERE = os.path.dirname(os.path.abspath(__file__))
-
-
-def name(v):
-    return f"{COLUMNS[v]}({UNITS[v]})"
-
-
-def fmt_params(x):
-    return ", ".join(f"{COLUMNS[v]}={x[i]:.1f} {UNITS[v]}" for i, v in enumerate(VARS))
-
-
-def to_unit(X):
-    """原始单位 -> [0, 1]"""
-    return (np.asarray(X, dtype=float) - LB) / (UB - LB)
-
-
-def from_unit(U):
-    """[0, 1] -> 原始单位"""
-    return np.asarray(U, dtype=float) * (UB - LB) + LB
+FEATURES = ["log_target", "speed"]
+SPEED_GRID = np.arange(SEARCH_SPEED[0], SEARCH_SPEED[1] + SPEED_STEP / 2, SPEED_STEP)
+EXP_COLUMNS = {
+    "target": "目标阻值(Ω)",
+    "freq": "频率(kHz)",
+    "speed": "速度(mm/s)",
+    "yield": "良率(%)",
+    "sd": "FT SD(%)",
+}
 
 
 def path(f):
     return f if os.path.isabs(f) else os.path.join(HERE, f)
 
 
+def score(yield_pct, sd):
+    return YIELD_WEIGHT * yield_pct - SD_WEIGHT * sd
+
+
+def fmt_ohm(r):
+    for scale, unit in ((1e6, "MΩ"), (1e3, "kΩ")):
+        if r >= scale:
+            return f"{r / scale:g} {unit}"
+    return f"{r:g} Ω"
+
+
+def fmt_recipe(f):
+    return f"{f:g} kHz（" + "，".join(f"{k}={v:g}" for k, v in RECIPES[int(f)].items()) + "）"
+
+
 def read_table(f):
     f = path(f)
+    if not os.path.exists(f):
+        sys.exit(f"错误：找不到数据文件 {f}\n试用演示数据：python trim_bo.py --history demo_history.csv check")
     if f.endswith((".xlsx", ".xls")):
-        return pd.read_excel(f)
+        return pd.read_excel(f, header=HEADER_ROW)
     try:
         return pd.read_csv(f, encoding="utf-8-sig")
     except UnicodeDecodeError:  # 中文 Windows 下 Excel 另存的 CSV 常为 GBK 编码
         return pd.read_csv(f, encoding="gbk")
 
 
-def clean(df, source, verbose):
-    df = df.rename(columns={v: k for k, v in COLUMNS.items()})
-    missing = [COLUMNS[c] for c in VARS + ["score"] if c not in df.columns]
+def clean(df, columns, source, verbose):
+    missing = [c for c in columns.values() if c not in df.columns]
     if missing:
         sys.exit(f"错误：{source} 中找不到列 {missing}，请检查 COLUMNS 配置")
-    df = df[VARS + ["score"]]
+    df = df.rename(columns={v: k for k, v in columns.items()})[list(columns)]
     n0 = len(df)
-    df = df.apply(pd.to_numeric, errors="coerce").dropna()  # 整数 -> 浮点，非数字/空值丢弃
+    df = df.apply(pd.to_numeric, errors="coerce").dropna().astype(float)
     if verbose and n0 > len(df):
         print(f"  {source}：去掉 {n0 - len(df)} 条缺失或非数字的记录")
-    in_range = np.all((df[VARS].values >= LB) & (df[VARS].values <= UB), axis=1)
-    if verbose and not in_range.all():
-        print(f"  {source}：去掉 {(~in_range).sum()} 条超出搜索范围的记录")
-    return df[in_range]
+    ok = df.freq.isin(RECIPES) & df.speed.between(*VALID_SPEED)
+    if verbose and not ok.all():
+        print(f"  {source}：去掉 {(~ok).sum()} 条配方未知或速度超出 {VALID_SPEED[0]:g}~{VALID_SPEED[1]:g} 的记录")
+    return df[ok]
 
 
 def load_experiments():
     if not os.path.exists(path(EXPERIMENTS_FILE)):
-        return pd.DataFrame(columns=["时间", *[COLUMNS[c] for c in VARS + ["score"]], "备注"])
-    return read_table(EXPERIMENTS_FILE)
+        return pd.DataFrame(columns=["时间", *EXP_COLUMNS.values(), "备注"])
+    return pd.read_csv(path(EXPERIMENTS_FILE), encoding="utf-8-sig")
 
 
-def load_all(verbose=False):
-    """返回 (X, y, 每条数据是否为新实验)"""
-    hist = clean(read_table(HISTORY_FILE), HISTORY_FILE, verbose)
+def load_all(args, verbose=False):
+    hist = clean(read_table(args.history), COLUMNS, args.history, verbose)
     exps = load_experiments()
-    exps = clean(exps, EXPERIMENTS_FILE, verbose) if len(exps) else hist.iloc[:0]
-    df = pd.concat([hist, exps], ignore_index=True)
-    is_new = np.r_[np.zeros(len(hist), bool), np.ones(len(exps), bool)]
-    return df[VARS].values.astype(float), df["score"].values.astype(float), is_new
+    exps = clean(exps, EXP_COLUMNS, EXPERIMENTS_FILE, verbose) if len(exps) else hist.iloc[:0]
+    df = pd.concat([hist.assign(new=False), exps.assign(new=True)], ignore_index=True)
+    df["score"] = score(df["yield"], df.sd)
+    df["log_target"] = np.log10(df.target)
+    return df
+
+
+def feature_scaler(df):
+    """输入归一化到 [0, 1]；分别按配方训练时共用同一尺度"""
+    lb = np.array([df.log_target.min(), VALID_SPEED[0]])
+    ub = np.array([df.log_target.max(), VALID_SPEED[1]])
+    return lambda X: (np.asarray(X, dtype=float) - lb) / (ub - lb)
 
 
 def make_model(dim):
-    # 输入已归一化到 [0, 1]，因此 theta 的范围不再需要按量纲缩放
+    # theta 下限为 1：长度尺度不超过整个归一化范围。下限太小时，分数平坦的配方会收敛到
+    # "theta 极小、方差极大"的退化解，不确定度虚高，EI 就会被带偏
+    np.random.seed(SEED)  # gpr.py 的随机重启用全局随机数，random_state 管不到
     return GaussianProcess(
         mean=trend.constant_trend(dim),
         corr="matern",
-        thetaL=1e-3 * np.ones(dim),
+        thetaL=np.ones(dim),
         thetaU=1e3 * np.ones(dim),
         nugget=1e-6,
         noise_estim=True,  # 实验有噪声：让 GP 自己估计噪声大小
         optimizer="BFGS",
-        wait_iter=3,
-        random_start=10 * len(VARS),
+        wait_iter=10,
+        random_start=15 * dim,
         likelihood="concentrated",
-        eval_budget=200 * dim,
+        eval_budget=1000 * dim,  # 各次重启共用这个预算，太小会跑不满 random_start
         random_state=SEED,
     )
 
 
-def build_optimizer(X, y, n_point=1):
-    """用全部已有数据热启动 BO"""
-    np.random.seed(SEED + len(y))  # 数据不变时推荐结果可复现
-    space = RealSpace([[0.0, 1.0]] * len(VARS), var_name=VARS)
-    return (BO if n_point == 1 else NoisyBO)(
-        search_space=space,
-        obj_fun=None,  # 实验在机台上做，通过 ask/tell 交互
-        model=make_model(len(VARS)),
-        warm_data=(to_unit(X).tolist(), y.tolist()),
-        n_point=n_point,
-        max_FEs=MAX_NEW_EXPERIMENTS,
-        minimize=False,  # 分数越高越好
-        acquisition_fun="EI" if n_point == 1 else "MGFI",
-        random_seed=SEED,
-    )
+class Models:
+    """每个配方一个 GP；对外的预测都是原始分数单位"""
+
+    def __init__(self, df):
+        self.scale = feature_scaler(df)
+        self.fitted = {}
+        for f, g in df.groupby("freq"):
+            y = g.score.values
+            model = make_model(len(FEATURES))
+            model.fit(self.scale(g[FEATURES].values), (y - y.mean()) / y.std())
+            self.fitted[f] = (model, y.mean(), y.std())
+
+    def predict(self, f, target, speeds):
+        speeds = np.atleast_1d(np.asarray(speeds, dtype=float))
+        X = np.column_stack([np.full(len(speeds), np.log10(target)), speeds])
+        model, mu, sigma = self.fitted[f]
+        mean, mse = model.predict(self.scale(X), eval_MSE=True)
+        return np.ravel(mean) * sigma + mu, np.sqrt(np.maximum(np.ravel(mse), 0)) * sigma
 
 
-def predict(opt, y, X):
-    """模型预测（原始分数单位）：模型在标准化后的分数上训练，需换算回来"""
-    mean, mse = opt.model.predict(to_unit(np.atleast_2d(X)), eval_MSE=True)
-    return np.ravel(mean) * y.std() + y.mean(), np.sqrt(np.ravel(mse)) * y.std()
+def candidates(models, target):
+    """目标阻值下，所有配方 × 速度网格的预测"""
+    rows = [
+        pd.DataFrame(dict(zip(("freq", "speed", "mean", "sd"), (f, SPEED_GRID, *models.predict(f, target, SPEED_GRID)))))
+        for f in models.fitted
+    ]
+    return pd.concat(rows, ignore_index=True)
 
 
-def model_best(opt, X, y):
-    """噪声下，以"模型预测分数最高的已测参数"作为当前最优，而不是单次实测最高分"""
-    mean, sd = predict(opt, y, X)
-    i = int(np.argmax(mean))
-    return X[i], mean[i], sd[i]
+def tested_points(df, models, target):
+    """目标阻值下做过的参数：实测均值 + 模型预测（已按模型预测从高到低排序）"""
+    g = df[df.target == target]
+    t = g.groupby(["freq", "speed"]).agg(n=("score", "size"), y=("yield", "mean"), sd=("sd", "mean")).reset_index()
+    t["mean"] = [models.predict(f, target, s)[0][0] for f, s in zip(t.freq, t.speed)]
+    return t.sort_values("mean", ascending=False, ignore_index=True)
+
+
+def best_so_far(df, models, target, cand):
+    """EI 的基准。实验有噪声，实测最高分往往偏高，因此用模型预测值"""
+    tested = tested_points(df, models, target)
+    return tested["mean"].iloc[0] if len(tested) else cand["mean"].max()
+
+
+def expected_improvement(mean, sd, best):
+    sd = np.maximum(sd, 1e-9)
+    z = (mean - best) / sd
+    return (mean - best) * norm.cdf(z) + sd * norm.pdf(z)
+
+
+def pick_batch(cand, n):
+    """按 EI 从高到低选，同一配方的速度保持间隔，避免一批实验都挤在一起"""
+    picks = []
+    for _, row in cand.sort_values("ei", ascending=False).iterrows():
+        if all(row.freq != p.freq or abs(row.speed - p.speed) >= BATCH_MIN_GAP for p in picks):
+            picks.append(row)
+        if len(picks) == n:
+            break
+    return picks
+
+
+def require_known_range(df, target):
+    if not df.target.min() <= target <= df.target.max():
+        sys.exit(f"错误：目标阻值 {fmt_ohm(target)} 超出数据范围 {fmt_ohm(df.target.min())} ~ {fmt_ohm(df.target.max())}")
+    if not (df.target == target).any():
+        print(f"⚠️ {fmt_ohm(target)} 没有做过实验，以下结果来自相邻阻值的插值，把握较低\n")
+
+
+def cross_validate(df, splitter, groups=None):
+    pred = pd.Series(index=df.index, dtype=float)
+    for f, g in df.groupby("freq"):
+        X, y = feature_scaler(df)(g[FEATURES].values), g.score.values
+        for train, test in splitter.split(X, groups=None if groups is None else g[groups]):
+            model = make_model(X.shape[1])
+            m, s = y[train].mean(), y[train].std()
+            model.fit(X[train], (y[train] - m) / s)
+            pred.loc[g.index[test]] = np.ravel(model.predict(X[test])) * s + m
+    return r2_score(df.score, pred), np.sqrt(((df.score - pred) ** 2).mean())
 
 
 # ================================== 子命令 ==================================
@@ -160,90 +244,91 @@ def model_best(opt, X, y):
 
 def cmd_check(args):
     print("读取数据：")
-    X, y, is_new = load_all(verbose=True)
-    print(f"  可用数据 {len(y)} 条（历史 {(~is_new).sum()} 条，新实验 {is_new.sum()} 条）")
-    print(f"  分数范围 {y.min():.2f} ~ {y.max():.2f}")
-    for i, v in enumerate(VARS):
-        print(f"  {name(v)} 范围 {X[:, i].min():g} ~ {X[:, i].max():g}（允许 {BOUNDS[v][0]:g} ~ {BOUNDS[v][1]:g}）")
-    _, counts = np.unique(X, axis=0, return_counts=True)
-    if (counts > 1).any():
-        print(f"  有 {(counts > 1).sum()} 组参数做过重复实验，可用于估计噪声")
+    df = load_all(args, verbose=True)
+    print(f"  可用数据 {len(df)} 条（历史 {(~df.new).sum()} 条，新实验 {df.new.sum()} 条），目标阻值 {df.target.nunique()} 种")
+    print(f"  分数 = {YIELD_WEIGHT:g} × 良率 - {SD_WEIGHT:g} × FT SD，范围 {df.score.min():.2f} ~ {df.score.max():.2f}")
+    for f, g in df.groupby("freq"):
+        print(f"  配方 {fmt_recipe(f)}：{len(g)} 条，平均分 {g.score.mean():.1f}")
 
-    U = to_unit(X)
-    y_pred = np.empty_like(y)
-    for train, test in KFold(5, shuffle=True, random_state=SEED).split(U):
-        model = make_model(U.shape[1])
-        model.fit(U[train], y[train])
-        y_pred[test] = np.ravel(model.predict(U[test]))
-    r2, rmse = r2_score(y, y_pred), np.sqrt(np.mean((y - y_pred) ** 2))
-    print(f"\n5 折交叉验证：R² = {r2:.3f}，预测误差 RMSE = {rmse:.2f} 分")
+    print("\n5 折交叉验证：")
+    r2, rmse = cross_validate(df, KFold(5, shuffle=True, random_state=SEED))
+    print(f"  已做过的目标阻值：R² = {r2:.3f}，预测误差 RMSE = {rmse:.2f} 分")
+    r2_new, rmse_new = cross_validate(df, GroupKFold(5), groups="target")
+    print(f"  没做过的目标阻值：R² = {r2_new:.3f}，预测误差 RMSE = {rmse_new:.2f} 分")
     if r2 < 0.3:
-        print("⚠️ R² 偏低：频率/速度对分数的解释力有限（或噪声很大），建议先排查数据再做优化")
+        print("⚠️ R² 偏低：工艺参数对分数的解释力有限（或噪声很大），建议先排查数据再做优化")
     else:
         print("模型能较好地预测分数，可以开始优化")
 
 
 def cmd_ask(args):
-    X, y, is_new = load_all()
-    done = is_new.sum()
-    if done >= MAX_NEW_EXPERIMENTS:
-        print(f"⚠️ 已完成 {done} 次实验，达到计划上限 {MAX_NEW_EXPERIMENTS}（可在配置中调大）")
-    opt = build_optimizer(X, y, args.n)
-    X_next = from_unit(opt.ask())
-    mean, sd = predict(opt, y, X_next)
-    print(f"基于 {len(y)} 条数据（新实验 {done}/{MAX_NEW_EXPERIMENTS}），推荐下一批实验参数：")
-    for i, x in enumerate(X_next):
-        print(f"  #{i + 1}: {fmt_params(x)}   模型预测分数 ≈ {mean[i]:.1f} ± {sd[i]:.1f}")
-    args_hint = " ".join(f"{x:.1f}" for x in X_next[0])
-    print(f"\n做完实验后录入结果，例如：python trim_bo.py tell {args_hint} <分数>")
+    df = load_all(args)
+    require_known_range(df, args.target)
+    models = Models(df)
+    cand = candidates(models, args.target)
+    best = best_so_far(df, models, args.target, cand)
+    cand["ei"] = expected_improvement(cand["mean"], cand["sd"], best)
+
+    print(f"目标阻值 {fmt_ohm(args.target)}，基于 {len(df)} 条数据，当前模型最优分数 ≈ {best:.1f}，推荐实验：")
+    picks = pick_batch(cand, args.n)
+    for i, p in enumerate(picks, 1):
+        print(f"  #{i}: {fmt_recipe(p.freq)}，速度 {p.speed:g} mm/s   模型预测分数 ≈ {p['mean']:.1f} ± {p['sd']:.1f}")
+    print(f"\n做完实验后录入结果：python trim_bo.py tell {args.target:.10g} {picks[0].freq:g} {picks[0].speed:g} <良率%> <FT_SD>")
     print("（如果机台上实际设置的参数与推荐值不同，请录入实际值）")
 
 
 def cmd_tell(args):
-    x = np.array([args.freq, args.speed], dtype=float)
-    for i, v in enumerate(VARS):
-        if not LB[i] <= x[i] <= UB[i]:
-            sys.exit(f"错误：{name(v)}={x[i]:g} 超出允许范围 {LB[i]:g} ~ {UB[i]:g}，未录入")
-    if not np.isfinite(args.score):
-        sys.exit("错误：分数必须是有效数字，未录入")
+    if args.freq not in RECIPES:
+        sys.exit(f"错误：频率只能是 {list(RECIPES)} kHz，未录入")
+    if not VALID_SPEED[0] <= args.speed <= VALID_SPEED[1]:
+        sys.exit(f"错误：速度 {args.speed:g} 超出允许范围 {VALID_SPEED[0]:g} ~ {VALID_SPEED[1]:g}，未录入")
+    if not 0 <= args.yield_pct <= 100:
+        sys.exit("错误：良率应在 0 ~ 100（%）之间，未录入")
+    if not (args.target > 0 and args.sd >= 0):
+        sys.exit("错误：目标阻值必须大于 0，FT SD 不能为负，未录入")
 
-    X, y, _ = load_all()
-    opt = build_optimizer(X, y)
-    mean, sd = predict(opt, y, x)  # 录入前模型对这一点的预测，用来观察模型是否靠谱
+    df = load_all(args)
+    mean, sd = Models(df).predict(args.freq, args.target, args.speed)  # 录入前的预测，用来观察模型是否靠谱
+    s = score(args.yield_pct, args.sd)
 
     exps = load_experiments()
-    row = {
-        "时间": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        COLUMNS["freq"]: x[0],
-        COLUMNS["speed"]: x[1],
-        COLUMNS["score"]: args.score,
-        "备注": args.m or "",
-    }
+    row = dict(zip(EXP_COLUMNS.values(), (args.target, args.freq, args.speed, args.yield_pct, args.sd)))
+    row = {"时间": datetime.now().strftime("%Y-%m-%d %H:%M"), **row, "备注": args.m or ""}
     exps = pd.concat([exps, pd.DataFrame([row])], ignore_index=True)
     exps.to_csv(path(EXPERIMENTS_FILE), index=False, encoding="utf-8-sig")
 
-    print(f"已录入第 {len(exps)} 次实验：{fmt_params(x)}，分数 {args.score:g}")
-    print(f"  录入前模型预测 {mean[0]:.1f} ± {sd[0]:.1f}，实测比预测{'高' if args.score > mean[0] else '低'} {abs(args.score - mean[0]):.1f} 分")
-    if args.score > y.max():
-        print(f"  🎉 超过此前所有数据的最高分 {y.max():.2f}")
-    print(f"  剩余计划实验次数：{max(0, MAX_NEW_EXPERIMENTS - len(exps))}")
+    print(f"已录入第 {len(exps)} 次实验：{fmt_ohm(args.target)}，{args.freq:g} kHz，{args.speed:g} mm/s，分数 {s:.2f}")
+    print(f"  录入前模型预测 {mean[0]:.1f} ± {sd[0]:.1f}，实测比预测{'高' if s > mean[0] else '低'} {abs(s - mean[0]):.1f} 分")
 
 
 def cmd_status(args):
-    X, y, is_new = load_all()
+    df = load_all(args)
+    models = Models(df)
+    print(f"历史数据 {(~df.new).sum()} 条，新实验 {df.new.sum()} 条")
     exps = load_experiments()
-    print(f"历史数据 {(~is_new).sum()} 条，新实验 {is_new.sum()}/{MAX_NEW_EXPERIMENTS} 次")
     if len(exps):
         print("\n新实验记录：")
         print(exps.fillna("").to_string(index=True))
 
-    opt = build_optimizer(X, y)
-    x_best, m, s = model_best(opt, X, y)
-    i_obs = int(np.argmax(y))
-    print(f"\n当前推荐的最优参数（模型预测最高的已测参数）：{fmt_params(x_best)}")
-    print(f"  模型预测分数 {m:.1f} ± {s:.1f}")
-    print(f"实测最高分 {y[i_obs]:.2f}（{fmt_params(X[i_obs])}，{'新实验' if is_new[i_obs] else '历史数据'}）")
-    print("  注：单次实测最高分可能含正向噪声，以模型预测的最优参数为准更稳妥")
+    if args.target is not None:
+        require_known_range(df, args.target)
+        cand = candidates(models, args.target)
+        best = cand.loc[cand.groupby("freq")["mean"].idxmax()]
+        print(f"\n{fmt_ohm(args.target)} 各配方的模型最优速度：")
+        for _, b in best.sort_values("mean", ascending=False).iterrows():
+            print(f"  {fmt_recipe(b.freq)}，速度 {b.speed:g} mm/s   预测分数 {b['mean']:.1f} ± {b['sd']:.1f}")
+        tested = tested_points(df, models, args.target)
+        if len(tested):
+            print("\n已测参数（按模型预测排序，前 5 组）：")
+            shown = tested.head(5).rename(columns={"freq": "频率", "speed": "速度", "n": "次数", "y": "良率%", "sd": "FT SD", "mean": "预测分数"})
+            print(shown.to_string(index=False, float_format="%.2f"))
+        return
+
+    print("\n各目标阻值的推荐参数（模型预测最高的已测参数；良率、SD 为该参数的实测均值）：")
+    print(f"  {'目标阻值':<12}{'频率':>9}{'速度':>11}{'预测分数':>10}{'良率%':>9}{'FT SD':>8}{'次数':>6}")
+    for target in sorted(df.target.unique()):
+        b = tested_points(df, models, target).iloc[0]
+        print(f"  {fmt_ohm(target):<14}{b.freq:>6g} kHz{b.speed:>6g} mm/s{b['mean']:>12.1f}{b.y:>10.1f}{b.sd:>9.2f}{b.n:>7.0f}")
 
 
 def cmd_undo(args):
@@ -256,19 +341,25 @@ def cmd_undo(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description="激光调阻参数的贝叶斯优化工具")
+    p = argparse.ArgumentParser(description="激光调阻工艺的贝叶斯优化工具")
+    p.add_argument("--history", default=HISTORY_FILE, help="历史数据文件（默认读配置里的 HISTORY_FILE）")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="检查数据，评估模型能否预测分数").set_defaults(func=cmd_check)
     a = sub.add_parser("ask", help="推荐下一组实验参数")
+    a.add_argument("target", type=float, help="目标阻值(Ω)，可写成 1e6")
     a.add_argument("-n", type=int, default=1, help="一次推荐几组参数（默认 1）")
     a.set_defaults(func=cmd_ask)
     t = sub.add_parser("tell", help="录入一次实验结果")
-    t.add_argument("freq", type=float, help=f"实际使用的{name('freq')}")
-    t.add_argument("speed", type=float, help=f"实际使用的{name('speed')}")
-    t.add_argument("score", type=float, help="按评估公式算出的分数")
+    t.add_argument("target", type=float, help="目标阻值(Ω)")
+    t.add_argument("freq", type=int, help=f"配方频率(kHz)，可选 {list(RECIPES)}")
+    t.add_argument("speed", type=float, help="实际使用的速度(mm/s)")
+    t.add_argument("yield_pct", type=float, metavar="yield", help="良率(%%)，例如 92.5")
+    t.add_argument("sd", type=float, help="FT SD(%%)")
     t.add_argument("-m", help="备注，例如批次号、异常情况")
     t.set_defaults(func=cmd_tell)
-    sub.add_parser("status", help="查看进度和当前最优参数").set_defaults(func=cmd_status)
+    s = sub.add_parser("status", help="查看进度和当前最优参数")
+    s.add_argument("target", type=float, nargs="?", help="只看某个目标阻值(Ω)")
+    s.set_defaults(func=cmd_status)
     sub.add_parser("undo", help="删除最后一条实验记录").set_defaults(func=cmd_undo)
     args = p.parse_args()
     args.func(args)

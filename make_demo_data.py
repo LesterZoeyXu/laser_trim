@@ -1,27 +1,26 @@
-"""生成一份【模拟】的激光调阻历史数据，仅用于演示热启动流程，不代表真实工艺规律。
+"""生成一份【模拟】的激光调阻历史数据，仅用于演示工具流程，不代表真实工艺规律。
 
-假设：分数在 频率≈65 kHz、速度≈110 mm/s 附近最高，并带有实验噪声；
-历史数据大多集中在常用参数附近，频率记录为整数（用来演示类型转换）。
+列名与真实数据一致。假设分数随目标阻值和速度平滑变化，不同配方的最佳速度不同，并带有实验噪声。
 """
 import numpy as np
 import pandas as pd
 
 rng = np.random.default_rng(0)
-n = 60
-
-freq = np.clip(np.round(rng.normal(55, 8, n)), 20, 100)  # 整数 kHz
-speed = np.clip(rng.normal(90, 25, n), 10, 200).round(1)  # mm/s
-score = (
-    90
-    - 0.015 * (freq - 65) ** 2
-    - 0.002 * (speed - 110) ** 2
-    - 0.0015 * (freq - 65) * (speed - 110)
-    + rng.normal(0, 1.5, n)  # 实验噪声
-)
-
-# 加入几条重复参数的记录（同一参数做了两次），以及一条缺失分数的记录
-dup = pd.DataFrame({"频率": freq[:3], "速度": speed[:3], "分数": score[:3] + rng.normal(0, 1.5, 3)})
-df = pd.DataFrame({"频率": freq.astype(int), "速度": speed, "分数": score.round(2)})
-df = pd.concat([df, dup.round(2), pd.DataFrame({"频率": [70], "速度": [100.0], "分数": [np.nan]})])
-df.to_csv("demo_history.csv", index=False)
-print(f"已生成 demo_history.csv，共 {len(df)} 条记录")
+rows = []
+for target in [100, 1e3, 1e4, 1e5, 5e5, 1e6, 5e6, 1e7]:
+    for freq, power, pulse, best_speed in [(10, 0.811, 7.2, 6), (50, 3.142, 16.3, 9), (100, 0.966, 26.0, 12)]:
+        for speed in [5, 7, 9, 11, 13, 15]:
+            for _ in range(3):
+                base = 85 - 0.8 * (speed - best_speed) ** 2 - 12 * (np.log10(target) - 4) ** 2 / (1 + freq / 50)
+                good = np.clip(base + rng.normal(0, 5), 0, 100)
+                rows.append({
+                    "电阻修阻目标阻值(Ω)": target,
+                    "功率(0w-10w)": power,
+                    "修阻速度(1mm/s-20 mm/s)": speed,
+                    "频率(1khz-100Khz)": freq,
+                    "脉宽(1ns~500ns)": pulse,
+                    "良率(%)": round(good, 2),
+                    "FT SD(%)": round(max(0.05, 3 - good / 35 + rng.normal(0, 0.2)), 3),
+                })
+pd.DataFrame(rows).to_csv("demo_history.csv", index=False, encoding="utf-8-sig")
+print(f"已生成 demo_history.csv，共 {len(rows)} 条记录")
