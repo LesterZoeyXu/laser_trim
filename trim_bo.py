@@ -3,13 +3,13 @@
 对给定的目标阻值，在 3 个固定配方（频率/功率/脉宽）和修阻速度中推荐下一组实验。
 
 用法：
-  python trim_bo.py check                            检查数据，评估模型预测能力
-  python trim_bo.py ask 1e6 [-n 3]                   推荐目标阻值 1 MΩ 的下一组（或 n 组）实验
-  python trim_bo.py tell 1e6 50 9 92.5 0.4 [-m 备注]  录入实验：目标阻值 频率 速度 良率 FT_SD
-  python trim_bo.py status [1e6]                     查看所有（或某个）目标阻值的最优参数
-  python trim_bo.py undo                             删除最后一条实验记录（录错时用）
+  uv run trim_bo.py check                            检查数据，评估模型预测能力
+  uv run trim_bo.py ask 1e6 [-n 3]                   推荐目标阻值 1 MΩ 的下一组（或 n 组）实验
+  uv run trim_bo.py tell 1e6 50 9 92.5 0.4 [-m 备注]  录入实验：目标阻值 频率 速度 良率 FT_SD
+  uv run trim_bo.py status [1e6]                     查看所有（或某个）目标阻值的最优参数
+  uv run trim_bo.py undo                             删除最后一条实验记录（录错时用）
 
-加 --history 文件 可以换数据来源，例如 python trim_bo.py --history demo_history.csv check
+加 --history 文件 可以换数据来源，例如 uv run trim_bo.py --history demo_history.csv check
 
 模型：每个配方一个高斯过程，输入为 (log10 目标阻值, 速度)，输出为分数。
 所有新实验记录在 experiments.csv 中，每次运行都用"历史数据 + 新实验"重新训练，不保存模型状态。
@@ -93,7 +93,7 @@ def fmt_recipe(f):
 def read_table(f):
     f = path(f)
     if not os.path.exists(f):
-        sys.exit(f"错误：找不到数据文件 {f}\n试用演示数据：python trim_bo.py --history demo_history.csv check")
+        sys.exit(f"错误：找不到数据文件 {f}\n试用演示数据：uv run trim_bo.py --history demo_history.csv check")
     if f.endswith((".xlsx", ".xls")):
         return pd.read_excel(f, header=HEADER_ROW)
     try:
@@ -273,7 +273,7 @@ def cmd_ask(args):
     picks = pick_batch(cand, args.n)
     for i, p in enumerate(picks, 1):
         print(f"  #{i}: {fmt_recipe(p.freq)}，速度 {p.speed:g} mm/s   模型预测分数 ≈ {p['mean']:.1f} ± {p['sd']:.1f}")
-    print(f"\n做完实验后录入结果：python trim_bo.py tell {args.target:.10g} {picks[0].freq:g} {picks[0].speed:g} <良率%> <FT_SD>")
+    print(f"\n做完实验后录入结果：uv run trim_bo.py tell {args.target:.10g} {picks[0].freq:g} {picks[0].speed:g} <良率%> <FT_SD>")
     print("（如果机台上实际设置的参数与推荐值不同，请录入实际值）")
 
 
