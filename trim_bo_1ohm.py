@@ -33,17 +33,8 @@ from sklearn.model_selection import KFold
 from bayes_optim.surrogate import GaussianProcess, trend
 
 # ============================== 配置 ==============================
-HISTORY_FILE = "data/AI参数优化项目数据统计.xlsx"
-HEADER_ROW = 2  # Excel 中列名所在行（从 0 开始数）
+HISTORY_FILE = "data/simple_data_1ohm.csv"  # 列：频率、速度、良率、FT SD
 EXPERIMENTS_FILE = "experiments_1ohm.csv"
-TARGET_RANGE = (0.5, 2.0)  # 1 Ω 段：目标阻值在这个范围内的数据才参与训练
-COLUMNS = {
-    "target": "电阻修阻目标阻值(Ω)",
-    "freq": "频率(1khz-100Khz)",
-    "speed": "修阻速度(1mm/s-20 mm/s)",
-    "yield": "良率(%)",
-    "sd": "FT SD(%)",
-}
 FREQS = (10, 50, 100)  # 可选频率(kHz)
 SPEED_RANGE = (5.0, 15.0)  # 推荐时搜索的速度范围
 SPEED_STEP = 0.5
@@ -81,10 +72,8 @@ def load_experiments():
 def load_data():
     if not os.path.exists(path(HISTORY_FILE)):
         sys.exit(f"错误：找不到数据文件 {path(HISTORY_FILE)}")
-    hist = pd.read_excel(path(HISTORY_FILE), header=HEADER_ROW)
-    hist = hist.rename(columns={v: k for k, v in COLUMNS.items()})[list(COLUMNS)]
-    hist = hist.apply(pd.to_numeric, errors="coerce").dropna().astype(float)
-    hist = hist[hist.target.between(*TARGET_RANGE) & hist.freq.isin(FREQS)]
+    hist = pd.read_csv(path(HISTORY_FILE), encoding="utf-8-sig")
+    hist = hist.rename(columns={v: k for k, v in EXP_COLUMNS.items()})[list(EXP_COLUMNS)].astype(float)
 
     exps = load_experiments().rename(columns={v: k for k, v in EXP_COLUMNS.items()})
     df = pd.concat([hist, exps[list(EXP_COLUMNS)].astype(float)], ignore_index=True)
