@@ -309,8 +309,9 @@ Linux（x86_64 / ARM）、Windows、Apple Silicon 的 Mac。Intel 芯片的 Mac 
 
 ---
 
-## 原理文档
+## 其他文档
 
-[GP（高斯过程）模型的训练原理](docs/gp_training.md)：GP 的假设、最大似然训练过程、预测与 EI 推荐。
+- [GP（高斯过程）模型的训练原理](docs/gp_training.md)：GP 的假设、最大似然训练过程、预测与 EI 推荐。
+- [trim_bo_1ohm.py 使用教程](docs/trim_bo_1ohm.md)：1 Ω 段简化版工具，只用频率和速度两个参数。
 
 `demo_history.csv` 是 `make_demo_data.py` 生成的**模拟数据**，列名与真实数据一致，不代表真实工艺规律。重新生成：`uv run make_demo_data.py`。
