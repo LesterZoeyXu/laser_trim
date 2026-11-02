@@ -39,7 +39,8 @@ FREQ_RANGE = (10.0, 100.0)  # 推荐时搜索的频率范围(kHz)
 FREQ_STEP = 5.0
 SPEED_RANGE = (5.0, 15.0)  # 推荐时搜索的速度范围
 SPEED_STEP = 0.5
-BATCH_MIN_GAP = 2.0  # 一批多组推荐时，同一频率的速度至少相隔多少 mm/s
+BATCH_MIN_GAP = 2.0  # 一批多组推荐时，频率相近的两组，速度至少相隔多少 mm/s
+BATCH_FREQ_GAP = 15.0  # 频率相差不到这么多 kHz，就算频率相近
 YIELD_WEIGHT, SD_WEIGHT = 0.5, 1.0  # 分数 = 0.5 × 良率 - 1 × FT SD
 SEED = 42
 # ==================================================================
@@ -152,7 +153,7 @@ def cmd_ask(args):
 
     picks = []
     for _, row in cand.sort_values("ei", ascending=False).iterrows():
-        if all(row.freq != p.freq or abs(row.speed - p.speed) >= BATCH_MIN_GAP for p in picks):
+        if all(abs(row.freq - p.freq) >= BATCH_FREQ_GAP or abs(row.speed - p.speed) >= BATCH_MIN_GAP for p in picks):
             picks.append(row)
         if len(picks) == args.n:
             break
