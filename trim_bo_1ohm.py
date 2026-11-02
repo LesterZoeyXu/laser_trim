@@ -1,7 +1,7 @@
 """激光调阻 1 Ω 段的简化版贝叶斯优化工具
 
 只用 1 Ω 段的数据训练一个 GP，输入为 (频率, 速度)，输出为分数，模型不使用目标阻值。
-频率只从 3 个固定配方中选。
+频率只从数据里有的 3 个值中选。
 
 用法：
   uv run trim_bo_1ohm.py check                     检查数据，评估模型预测能力
@@ -44,11 +44,7 @@ COLUMNS = {
     "yield": "良率(%)",
     "sd": "FT SD(%)",
 }
-RECIPES = {  # 频率(kHz) -> 固定搭配的功率和脉宽
-    10: {"功率(W)": 0.811, "脉宽(ns)": 7.2},
-    50: {"功率(W)": 3.142, "脉宽(ns)": 16.3},
-    100: {"功率(W)": 0.966, "脉宽(ns)": 26.0},
-}
+FREQS = (10, 50, 100)  # 可选频率(kHz)
 SPEED_RANGE = (5.0, 15.0)  # 推荐时搜索的速度范围
 SPEED_STEP = 0.5
 BATCH_MIN_GAP = 2.0  # 一批多组推荐时，同一频率的速度至少相隔多少 mm/s
@@ -58,8 +54,8 @@ SEED = 42
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FEATURES = ["freq", "speed"]
-LB = np.array([min(RECIPES), SPEED_RANGE[0]], dtype=float)
-UB = np.array([max(RECIPES), SPEED_RANGE[1]], dtype=float)
+LB = np.array([min(FREQS), SPEED_RANGE[0]], dtype=float)
+UB = np.array([max(FREQS), SPEED_RANGE[1]], dtype=float)
 EXP_COLUMNS = {"freq": "频率(kHz)", "speed": "速度(mm/s)", "yield": "良率(%)", "sd": "FT SD(%)"}
 
 
@@ -88,7 +84,7 @@ def load_data():
     hist = pd.read_excel(path(HISTORY_FILE), header=HEADER_ROW)
     hist = hist.rename(columns={v: k for k, v in COLUMNS.items()})[list(COLUMNS)]
     hist = hist.apply(pd.to_numeric, errors="coerce").dropna().astype(float)
-    hist = hist[hist.target.between(*TARGET_RANGE) & hist.freq.isin(RECIPES)]
+    hist = hist[hist.target.between(*TARGET_RANGE) & hist.freq.isin(FREQS)]
 
     exps = load_experiments().rename(columns={v: k for k, v in EXP_COLUMNS.items()})
     df = pd.concat([hist, exps[list(EXP_COLUMNS)].astype(float)], ignore_index=True)
@@ -134,10 +130,6 @@ def tested_points(df, model):
     return t.sort_values("pred", ascending=False, ignore_index=True)
 
 
-def fmt_recipe(f):
-    return f"{f:g} kHz（" + "，".join(f"{k}={v:g}" for k, v in RECIPES[int(f)].items()) + "）"
-
-
 # ================================== 子命令 ==================================
 
 
@@ -145,7 +137,7 @@ def cmd_check(args):
     df = load_data()
     print(f"1 Ω 段数据 {len(df)} 条，分数范围 {df.score.min():.2f} ~ {df.score.max():.2f}")
     for f, g in df.groupby("freq"):
-        print(f"  {fmt_recipe(f)}：{len(g)} 条，平均分 {g.score.mean():.1f}")
+        print(f"  {f:g} kHz：{len(g)} 条，平均分 {g.score.mean():.1f}")
 
     X, y = df[FEATURES].values, df.score.values
     pred = np.empty_like(y)
@@ -158,7 +150,7 @@ def cmd_ask(args):
     df = load_data()
     model = fit(df)
     speeds = np.arange(SPEED_RANGE[0], SPEED_RANGE[1] + SPEED_STEP / 2, SPEED_STEP)
-    cand = pd.DataFrame([(f, s) for f in RECIPES for s in speeds], columns=FEATURES).astype(float)
+    cand = pd.DataFrame([(f, s) for f in FREQS for s in speeds], columns=FEATURES).astype(float)
     cand["mean"], cand["std"] = model.predict(cand[FEATURES].values)
 
     # 实验有噪声，EI 的基准用已测参数的模型预测最高分，而不是实测最高分
@@ -176,13 +168,13 @@ def cmd_ask(args):
 
     print(f"基于 {len(df)} 条 1 Ω 段数据，当前模型最优分数 ≈ {best:.1f}，推荐实验：")
     for i, p in enumerate(picks, 1):
-        print(f"  #{i}: {fmt_recipe(p.freq)}，速度 {p.speed:g} mm/s   模型预测分数 ≈ {p['mean']:.1f} ± {p['std']:.1f}")
+        print(f"  #{i}: {p.freq:g} kHz，速度 {p.speed:g} mm/s   模型预测分数 ≈ {p['mean']:.1f} ± {p['std']:.1f}")
     print(f"\n做完实验后录入结果：uv run trim_bo_1ohm.py tell {picks[0].freq:g} {picks[0].speed:g} <良率%> <FT_SD>")
 
 
 def cmd_tell(args):
-    if args.freq not in RECIPES:
-        sys.exit(f"错误：频率只能是 {list(RECIPES)} kHz，未录入")
+    if args.freq not in FREQS:
+        sys.exit(f"错误：频率只能是 {list(FREQS)} kHz，未录入")
     if not 0 <= args.yield_pct <= 100 or args.sd < 0:
         sys.exit("错误：良率应在 0 ~ 100（%）之间，FT SD 不能为负，未录入")
 
@@ -221,7 +213,7 @@ def main():
     a.add_argument("-n", type=int, default=1, help="一次推荐几组参数（默认 1）")
     a.set_defaults(func=cmd_ask)
     t = sub.add_parser("tell", help="录入一次实验结果")
-    t.add_argument("freq", type=int, help=f"频率(kHz)，可选 {list(RECIPES)}")
+    t.add_argument("freq", type=int, help=f"频率(kHz)，可选 {list(FREQS)}")
     t.add_argument("speed", type=float, help="实际使用的速度(mm/s)")
     t.add_argument("yield_pct", type=float, metavar="yield", help="良率(%%)")
     t.add_argument("sd", type=float, help="FT SD(%%)")
