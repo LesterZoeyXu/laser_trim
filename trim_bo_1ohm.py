@@ -1,7 +1,7 @@
 """激光调阻 1 Ω 段的简化版贝叶斯优化工具
 
 只用 1 Ω 段的数据训练一个 GP，输入为 (频率, 速度)，输出为分数，模型不使用目标阻值。
-频率只从数据里有的 3 个值中选。
+推荐时频率在 10～100 kHz 内搜索。历史数据只有 10、50、100 kHz，中间的频率是模型插值，把握较低。
 
 用法：
   uv run trim_bo_1ohm.py check                     检查数据，评估模型预测能力
@@ -35,7 +35,8 @@ from bayes_optim.surrogate import GaussianProcess, trend
 # ============================== 配置 ==============================
 HISTORY_FILE = "data/simple_data_1ohm.csv"  # 列：频率、速度、良率、FT SD
 EXPERIMENTS_FILE = "experiments_1ohm.csv"
-FREQS = (10, 50, 100)  # 可选频率(kHz)
+FREQ_RANGE = (10.0, 100.0)  # 推荐时搜索的频率范围(kHz)
+FREQ_STEP = 5.0
 SPEED_RANGE = (5.0, 15.0)  # 推荐时搜索的速度范围
 SPEED_STEP = 0.5
 BATCH_MIN_GAP = 2.0  # 一批多组推荐时，同一频率的速度至少相隔多少 mm/s
@@ -45,8 +46,8 @@ SEED = 42
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FEATURES = ["freq", "speed"]
-LB = np.array([min(FREQS), SPEED_RANGE[0]], dtype=float)
-UB = np.array([max(FREQS), SPEED_RANGE[1]], dtype=float)
+LB = np.array([FREQ_RANGE[0], SPEED_RANGE[0]], dtype=float)
+UB = np.array([FREQ_RANGE[1], SPEED_RANGE[1]], dtype=float)
 EXP_COLUMNS = {"freq": "频率(kHz)", "speed": "速度(mm/s)", "yield": "良率(%)", "sd": "FT SD(%)"}
 
 
@@ -138,8 +139,9 @@ def cmd_check(args):
 def cmd_ask(args):
     df = load_data()
     model = fit(df)
+    freqs = np.arange(FREQ_RANGE[0], FREQ_RANGE[1] + FREQ_STEP / 2, FREQ_STEP)
     speeds = np.arange(SPEED_RANGE[0], SPEED_RANGE[1] + SPEED_STEP / 2, SPEED_STEP)
-    cand = pd.DataFrame([(f, s) for f in FREQS for s in speeds], columns=FEATURES).astype(float)
+    cand = pd.DataFrame([(f, s) for f in freqs for s in speeds], columns=FEATURES).astype(float)
     cand["mean"], cand["std"] = model.predict(cand[FEATURES].values)
 
     # 实验有噪声，EI 的基准用已测参数的模型预测最高分，而不是实测最高分
@@ -162,8 +164,8 @@ def cmd_ask(args):
 
 
 def cmd_tell(args):
-    if args.freq not in FREQS:
-        sys.exit(f"错误：频率只能是 {list(FREQS)} kHz，未录入")
+    if not FREQ_RANGE[0] <= args.freq <= FREQ_RANGE[1]:
+        sys.exit(f"错误：频率 {args.freq:g} 超出范围 {FREQ_RANGE[0]:g} ~ {FREQ_RANGE[1]:g} kHz，未录入")
     if not 0 <= args.yield_pct <= 100 or args.sd < 0:
         sys.exit("错误：良率应在 0 ~ 100（%）之间，FT SD 不能为负，未录入")
 
@@ -172,7 +174,7 @@ def cmd_tell(args):
     row = {"时间": datetime.now().strftime("%Y-%m-%d %H:%M"), **row, "备注": args.m or ""}
     exps = pd.concat([exps, pd.DataFrame([row])], ignore_index=True)
     exps.to_csv(path(EXPERIMENTS_FILE), index=False, encoding="utf-8-sig")
-    print(f"已录入第 {len(exps)} 次实验：{args.freq} kHz，{args.speed:g} mm/s，分数 {score(args.yield_pct, args.sd):.2f}")
+    print(f"已录入第 {len(exps)} 次实验：{args.freq:g} kHz，{args.speed:g} mm/s，分数 {score(args.yield_pct, args.sd):.2f}")
 
 
 def cmd_status(args):
@@ -202,7 +204,7 @@ def main():
     a.add_argument("-n", type=int, default=1, help="一次推荐几组参数（默认 1）")
     a.set_defaults(func=cmd_ask)
     t = sub.add_parser("tell", help="录入一次实验结果")
-    t.add_argument("freq", type=int, help=f"频率(kHz)，可选 {list(FREQS)}")
+    t.add_argument("freq", type=float, help="实际使用的频率(kHz)")
     t.add_argument("speed", type=float, help="实际使用的速度(mm/s)")
     t.add_argument("yield_pct", type=float, metavar="yield", help="良率(%%)")
     t.add_argument("sd", type=float, help="FT SD(%%)")
