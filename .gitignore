@@ -3,7 +3,7 @@ __pycache__/
 .venv/
 
 # 生产数据默认不入库（实验记录、真实历史数据）；确认可以公开后再按需移除
-experiments.csv
+experiments*.csv
 *.xlsx
 *.xls
 data/
