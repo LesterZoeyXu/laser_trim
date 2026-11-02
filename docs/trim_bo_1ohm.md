@@ -64,11 +64,40 @@ uv sync
 
 ## 二、放入数据
 
-训练数据 `simple_data_1ohm.csv` **不在 GitHub 上**，需要手动复制到项目的 `data/` 目录（没有就新建）：
+训练数据 `simple_data_1ohm.csv` **不在 GitHub 上**，用下面任一方法准备好。
+
+**方法一：从原始 Excel 生成（推荐）**
+
+把原始数据 `AI参数优化项目数据统计.xlsx` 放进 `data/` 目录（没有就新建），然后运行：
+
+```bash
+uv run make_simple_data.py
+```
+
+```
+读取 data/AI参数优化项目数据统计.xlsx：1379 条，去掉缺失 0 条、速度超出 1~20 的 4 条
+目标阻值 0.5 ~ 2 Ω：70 条，包含阻值 [1.0, 1.1, 1.15, 1.2]
+已写入 data/simple_data_1ohm.csv
+```
+
+只想要某个阻值，用 `--min`、`--max` 指定范围，用 `-o` 指定输出文件，例如只要 1 Ω：
+
+```bash
+uv run make_simple_data.py --min 0.9 --max 1.05 -o data/simple_data_1ohm_only.csv
+```
+
+用了其他文件名时，记得同步修改 `trim_bo_1ohm.py` 里的 `HISTORY_FILE`。
+
+**方法二：直接复制**
+
+从已有的电脑把 `simple_data_1ohm.csv` 复制过来。
+
+两种方法得到的文件位置都是：
 
 ```
 laser_trim/
 └── data/
+    ├── AI参数优化项目数据统计.xlsx   （方法一需要）
     └── simple_data_1ohm.csv
 ```
 
@@ -183,6 +212,7 @@ uv run trim_bo_1ohm.py undo     # 删除最后一条
 | `uv run trim_bo_1ohm.py tell 频率 速度 良率 SD` | 录入实验结果（`-m` 加备注） |
 | `uv run trim_bo_1ohm.py undo` | 删除最后一条录入 |
 | `uv run trim_bo_1ohm.py --help` | 查看帮助 |
+| `uv run make_simple_data.py` | 从原始 Excel 生成训练数据 |
 
 ---
 
@@ -226,6 +256,7 @@ SEED = 42                     # 随机种子，保证同样的数据每次结果
 |---|---|
 | `No pyproject.toml found` | 没在项目目录里，先 `cd laser_trim` |
 | `错误：找不到数据文件` | `data/simple_data_1ohm.csv` 没放好，见[第二节](#二放入数据) |
+| `make_simple_data.py` 报 `找不到` | 原始 Excel 没放进 `data/`，或文件名不一致，可以用 `-i` 指定 |
 | `Host key verification failed` | 运行 `ssh -T git@github.com`，核对指纹后输入 `yes` |
 | `Permission denied (publickey)` | SSH 密钥没配置，见[安装第 2 步](#2-配置-github-ssh-密钥) |
 | `uv: command not found` | 装完 uv 后重新打开终端 |
