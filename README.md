@@ -45,7 +45,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 ### 2. 配置 GitHub SSH 密钥
 
-本项目和它依赖的 `bayes-optim` 都通过 SSH 从 GitHub 下载。先安装 git，然后：
+本项目通过 SSH 从 GitHub 下载。先安装 git，然后：
 
 ```bash
 ssh-keygen -t ed25519 -C "你的邮箱"      # 一路回车
@@ -53,7 +53,7 @@ cat ~/.ssh/id_ed25519.pub                # 把输出的内容添加到 https://g
 ssh -T git@github.com                    # 看到 "Hi xxx! You've successfully authenticated" 就成功了
 ```
 
-如果仓库是私有的，还需要仓库所有者把你加为 `laser_trim` 和 `BayesianOp` 两个仓库的协作者。
+如果仓库是私有的，还需要仓库所有者把你加为 `laser_trim` 仓库的协作者。
 
 ### 3. 下载代码并创建环境
 
@@ -254,12 +254,23 @@ YIELD_WEIGHT, SD_WEIGHT = 0.5, 1.0   # 分数 = 0.5 × 良率 - 1 × FT SD
 
 ```bash
 git pull && uv sync                          # 获取最新代码，并同步环境
-uv lock --upgrade-package bayes-optim        # BayesianOp 仓库有新修复时，更新到最新版本
-uv sync                                      # 然后同步环境
 uv add scipy                                 # 需要新增依赖时（会自动更新 pyproject.toml 和 uv.lock）
 ```
 
 修改 `pyproject.toml` / `uv.lock` 后记得提交，这样其他人 `uv sync` 时得到的环境与你一致。
+
+### 更新 bayes-optim
+
+`bayes-optim` 不从 GitHub 现场构建，而是安装 `wheels/` 里预先构建好的安装包，所以任何系统上 `uv sync` 都不需要构建，也不需要 `BayesianOp` 仓库的权限。`BayesianOp` 有新修复时，在 Linux 或 Mac 上重新构建并替换：
+
+```bash
+cd ../Bayesian-Optimization && git pull          # BayesianOp 仓库的本地克隆
+uv build --wheel -o ../laser_trim/wheels .       # 生成新的 bayes_optim-*.whl
+cd ../laser_trim
+uv lock --upgrade-package bayes-optim && uv sync # 更新锁定版本并同步环境
+```
+
+如果版本号变了，文件名也会变，要同步修改 `pyproject.toml` 里的路径，并删掉旧的 wheel。改完后提交 `wheels/`、`pyproject.toml` 和 `uv.lock`。
 
 ### 数据和实验记录
 
@@ -278,8 +289,8 @@ uv add scipy                                 # 需要新增依赖时（会自动
 **`错误：找不到数据文件`**
 Excel 没有放到 `data/` 目录下，或者文件名不一致，见[第二节](#二放入数据)。
 
-**`uv sync` 报 `Permission denied (publickey)`**
-SSH 密钥没有配置好，或者没有 `BayesianOp` 仓库的访问权限。运行 `ssh -T git@github.com` 检查。
+**`git clone` 报 `Permission denied (publickey)` 或 `Host key verification failed`**
+SSH 密钥没有配置好，或者第一次连接 GitHub 还没确认主机。运行 `ssh -T git@github.com`，按提示输入 `yes`，看到 `Hi xxx!` 即可。
 
 **`uv: command not found`**
 安装 uv 后没有重新打开终端。重开终端，或按安装脚本最后的提示把 uv 加入 `PATH`。

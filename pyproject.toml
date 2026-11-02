@@ -15,8 +15,9 @@ dependencies = [
 package = false  # 这是一个脚本工具，不需要打包安装
 
 [tool.uv.sources]
-# 修复过若干 bug 的 bayes-optim
-bayes-optim = { git = "ssh://git@github.com/LesterZoeyXu/BayesianOp.git", branch = "master" }
+# 修复过若干 bug 的 bayes-optim：用 LesterZoeyXu/BayesianOp 的 37b418e 预先构建的 wheel，
+# 安装时不需要构建（避免 Windows 上的构建问题），也不需要 BayesianOp 仓库的访问权限
+bayes-optim = { path = "wheels/bayes_optim-0.3.0-py3-none-any.whl" }
 # torch 只用 CPU 版，比默认的 CUDA 版小几 GB
 torch = { index = "pytorch-cpu" }
 
