@@ -159,13 +159,29 @@ uv run trim_bo_1ohm.py ask -n 3     # 一次推荐 3 组
 ```
 
 ```
-基于 70 条 1 Ω 段数据，当前模型最优分数 ≈ 15.5，推荐实验：
-  #1: 50 kHz，速度 15 mm/s   模型预测分数 ≈ 15.5 ± 2.3
+基于 70 条 1 Ω 段数据，当前模型最优分数 ≈ 15.5，采集函数 UCB（κ=2），推荐实验：
+  #1: 55 kHz，速度 15 mm/s   模型预测分数 ≈ 10.3 ± 5.0
 
-做完实验后录入结果：uv run trim_bo_1ohm.py tell 50 15 <良率%> <FT_SD>
+做完实验后录入结果：uv run trim_bo_1ohm.py tell 55 15 <良率%> <FT_SD>
 ```
 
 `±` 后面是不确定度，越大说明模型越没把握。
+
+**采集函数**：默认用 UCB（置信上界），UCB = 预测分数 + κ × 不确定度，κ 默认 2。κ 越大越偏向探索没试过的参数，越小越保守。也可以改用 EI（期望改进），它会自动平衡“在已知好区域附近挖掘”和“去没试过的地方探索”：
+
+```bash
+uv run trim_bo_1ohm.py ask                    # UCB，κ = 2（默认）
+uv run trim_bo_1ohm.py ask --kappa 1          # UCB，κ = 1，更保守
+uv run trim_bo_1ohm.py ask --acq ei           # 改用 EI
+```
+
+用现在的数据实测：
+
+| 设置 | 推荐 |
+|---|---|
+| UCB，κ = 2 或 3（默认 κ = 2） | 55 kHz 等中间频率，去探索没有数据的地方 |
+| UCB，κ = 0 或 1 | 50 kHz，14.5～15 mm/s，留在已知的好区域 |
+| EI | 50 kHz，15 mm/s |
 
 ### 第 3 步：上机台做实验
 
@@ -208,7 +224,7 @@ uv run trim_bo_1ohm.py undo     # 删除最后一条
 |---|---|
 | `uv run trim_bo_1ohm.py check` | 检查数据，评估模型准确度 |
 | `uv run trim_bo_1ohm.py status` | 已测参数排名（`--top N` 控制显示几组） |
-| `uv run trim_bo_1ohm.py ask` | 推荐下一组实验（`-n N` 一次推荐 N 组） |
+| `uv run trim_bo_1ohm.py ask` | 推荐下一组实验（`-n N` 一次推荐 N 组，`--acq ei` 改用 EI，`--kappa` 调 UCB 的 κ） |
 | `uv run trim_bo_1ohm.py tell 频率 速度 良率 SD` | 录入实验结果（`-m` 加备注） |
 | `uv run trim_bo_1ohm.py undo` | 删除最后一条录入 |
 | `uv run trim_bo_1ohm.py --help` | 查看帮助 |
@@ -229,6 +245,7 @@ SPEED_RANGE = (5.0, 15.0)     # 推荐时的速度范围(mm/s)
 SPEED_STEP = 0.5              # 速度步长，机台只能设整数时改成 1
 BATCH_MIN_GAP = 2.0           # ask -n 时，频率相近的两组，速度至少相隔多少 mm/s
 BATCH_FREQ_GAP = 15.0         # ask -n 时，频率相差不到这么多 kHz 就算相近
+UCB_KAPPA = 2.0               # UCB 的 κ 默认值
 YIELD_WEIGHT, SD_WEIGHT = 0.5, 1.0   # 分数 = 0.5 × 良率 − 1 × FT SD
 SEED = 42                     # 随机种子，保证同样的数据每次结果相同
 ```

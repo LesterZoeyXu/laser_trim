@@ -5,7 +5,7 @@
 
 用法：
   uv run trim_bo_1ohm.py check                     检查数据，评估模型预测能力
-  uv run trim_bo_1ohm.py ask [-n 3]                推荐下一组（或 n 组）实验
+  uv run trim_bo_1ohm.py ask [-n 3] [--acq ei]      推荐下一组（或 n 组）实验，默认用 UCB
   uv run trim_bo_1ohm.py tell 50 13 40 0.9 [-m 备注]  录入实验：频率 速度 良率 FT_SD
   uv run trim_bo_1ohm.py status                    查看已测参数的排名
   uv run trim_bo_1ohm.py undo                      删除最后一条实验记录
@@ -41,6 +41,7 @@ SPEED_RANGE = (5.0, 15.0)  # 推荐时搜索的速度范围
 SPEED_STEP = 0.5
 BATCH_MIN_GAP = 2.0  # 一批多组推荐时，频率相近的两组，速度至少相隔多少 mm/s
 BATCH_FREQ_GAP = 15.0  # 频率相差不到这么多 kHz，就算频率相近
+UCB_KAPPA = 2.0  # UCB = 预测分数 + κ × 不确定度；κ 越大越偏向探索没试过的参数
 YIELD_WEIGHT, SD_WEIGHT = 0.5, 1.0  # 分数 = 0.5 × 良率 - 1 × FT SD
 SEED = 42
 # ==================================================================
@@ -145,20 +146,25 @@ def cmd_ask(args):
     cand = pd.DataFrame([(f, s) for f in freqs for s in speeds], columns=FEATURES).astype(float)
     cand["mean"], cand["std"] = model.predict(cand[FEATURES].values)
 
-    # 实验有噪声，EI 的基准用已测参数的模型预测最高分，而不是实测最高分
+    # 实验有噪声，当前最优用已测参数的模型预测最高分，而不是实测最高分
     best = tested_points(df, model).pred.iloc[0]
-    std = np.maximum(cand["std"], 1e-9)
-    z = (cand["mean"] - best) / std
-    cand["ei"] = (cand["mean"] - best) * norm.cdf(z) + std * norm.pdf(z)
+    if args.acq == "ucb":
+        cand["acq"] = cand["mean"] + args.kappa * cand["std"]
+        acq_name = f"UCB（κ={args.kappa:g}）"
+    else:
+        std = np.maximum(cand["std"], 1e-9)
+        z = (cand["mean"] - best) / std
+        cand["acq"] = (cand["mean"] - best) * norm.cdf(z) + std * norm.pdf(z)
+        acq_name = "EI"
 
     picks = []
-    for _, row in cand.sort_values("ei", ascending=False).iterrows():
+    for _, row in cand.sort_values("acq", ascending=False).iterrows():
         if all(abs(row.freq - p.freq) >= BATCH_FREQ_GAP or abs(row.speed - p.speed) >= BATCH_MIN_GAP for p in picks):
             picks.append(row)
         if len(picks) == args.n:
             break
 
-    print(f"基于 {len(df)} 条 1 Ω 段数据，当前模型最优分数 ≈ {best:.1f}，推荐实验：")
+    print(f"基于 {len(df)} 条 1 Ω 段数据，当前模型最优分数 ≈ {best:.1f}，采集函数 {acq_name}，推荐实验：")
     for i, p in enumerate(picks, 1):
         print(f"  #{i}: {p.freq:g} kHz，速度 {p.speed:g} mm/s   模型预测分数 ≈ {p['mean']:.1f} ± {p['std']:.1f}")
     print(f"\n做完实验后录入结果：uv run trim_bo_1ohm.py tell {picks[0].freq:g} {picks[0].speed:g} <良率%> <FT_SD>")
@@ -203,6 +209,8 @@ def main():
     sub.add_parser("check", help="检查数据，评估模型能否预测分数").set_defaults(func=cmd_check)
     a = sub.add_parser("ask", help="推荐下一组实验参数")
     a.add_argument("-n", type=int, default=1, help="一次推荐几组参数（默认 1）")
+    a.add_argument("--acq", choices=["ei", "ucb"], default="ucb", help="采集函数：ucb 置信上界（默认），ei 期望改进")
+    a.add_argument("--kappa", type=float, default=UCB_KAPPA, help=f"UCB 的 κ，越大越偏向探索（默认 {UCB_KAPPA:g}）")
     a.set_defaults(func=cmd_ask)
     t = sub.add_parser("tell", help="录入一次实验结果")
     t.add_argument("freq", type=float, help="实际使用的频率(kHz)")
